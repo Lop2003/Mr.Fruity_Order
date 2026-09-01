@@ -18,7 +18,8 @@
     "30_Parsing.gs",
     "40_Stock.gs",
     "50_Orders.gs",
-    "60_Cutoff.gs"
+    "60_Cutoff.gs",
+    "90_TestHarness.gs"
   ],
   "skipSubdirectories": false
 }

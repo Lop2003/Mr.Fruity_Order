@@ -118,17 +118,37 @@ const appScriptFiles = [
     "40_Stock.gs",
     "50_Orders.gs",
     "60_Cutoff.gs",
+    "90_TestHarness.gs",
 ];
 const appScriptSource = appScriptFiles
     .map((file) => fs.readFileSync(`src/${file}`, "utf8"))
     .join("");
 vm.runInContext(appScriptSource +
-    "\nthis.api={CONFIG,withScriptLock,getStableHash,normalizeDelivDate,parseOrderMessage,processStockUpdate,applyStockUpdatePlan,processOrderUpdate,saveEventJournal,loadEventJournal,updateDeliverySheet,getOrderRounds,findStoreOrders,getOrderSnapshotHash,formatCancelPreview,cancelOrderIfSnapshotMatches,updatePurchaseSummarySheet,prepareStockDeduction,applyStockDeductionPlan,deductStockForCutoff,createCutoffRoundDivider,executeCutoff,saveCutoffJournal,loadCutoffJournal,beginEventLog,setActiveLogContext,setActiveReplyState,finishActiveLog,recordEventFailure,replyToLine,getStoreMappingDictionary,getNoStockProductNames,getOrderMatchNotes,formatStoreMappingLog,onEdit};", context);
+    "\nthis.api={CONFIG,withScriptLock,getStableHash,normalizeDelivDate,parseOrderMessage,processStockUpdate,applyStockUpdatePlan,processOrderUpdate,saveEventJournal,loadEventJournal,updateDeliverySheet,getOrderRounds,findStoreOrders,getOrderSnapshotHash,formatCancelPreview,cancelOrderIfSnapshotMatches,updatePurchaseSummarySheet,prepareStockDeduction,applyStockDeductionPlan,deductStockForCutoff,createCutoffRoundDivider,executeCutoff,saveCutoffJournal,loadCutoffJournal,beginEventLog,setActiveLogContext,setActiveReplyState,finishActiveLog,recordEventFailure,replyToLine,getStoreMappingDictionary,getNoStockProductNames,getOrderMatchNotes,formatStoreMappingLog,onEdit,validateDirectOrderTestInput};", context);
 
 const claspProject = JSON.parse(fs.readFileSync(".clasp.json", "utf8"));
 assert.equal(claspProject.rootDir, "src");
 assert.deepEqual(claspProject.filePushOrder, appScriptFiles);
 assert.equal(context.api.CONFIG.SHEET_ID, "1IUpkB2Cs2cjXVoBm_d9OYiYxhxzz9ReWCftNOlKphVk");
+assert.deepEqual(
+    context.api.validateDirectOrderTestInput(
+        "31/12/99\nTEST-Codex\nแครอท 0.123 กก",
+        "test-direct-20260902-01",
+    ),
+    { eventId: "test-direct-20260902-01", deliveryDate: "31/12/99", storeName: "TEST-Codex" },
+);
+assert.throws(
+    () => context.api.validateDirectOrderTestInput("31/12/99\nร้านจริง\nแครอท 1 กก", "test-direct-20260902-02"),
+    /TEST-/,
+);
+assert.throws(
+    () => context.api.validateDirectOrderTestInput("02/09/69\nTEST-Codex\nแครอท 1 กก", "test-direct-20260902-03"),
+    /31\/12\/99/,
+);
+assert.throws(
+    () => context.api.validateDirectOrderTestInput("ตัดรอบ 31/12/99", "test-direct-20260902-04"),
+    /คำสั่งแอดมิน/,
+);
 
 function purchaseRow(round) {
     const rows = mainBook.getSheetByName("ใบซื้อ-19-07-69").getDataRange().getValues();
