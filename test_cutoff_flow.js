@@ -798,6 +798,7 @@ context.api.saveCutoffJournal(mainBook, "26/07/69|1", "26/07/69", 1, "evt-resume
 const resumedAfterDivider = context.api.executeCutoff(mainBook, "26/07/69", "evt-resume-4");
 assert.equal(resumedAfterDivider.res.success, true);
 assert.equal(resumedAfterDivider.res.alreadyExists, true);
+assert.equal(resumedAfterDivider.recoveredRound, undefined);
 assert.equal(mainBook.getSheetByName("ออเดอร์-26-07-69").rows.filter((row) => row[0] === "รอบ 2").length, 1);
 
 // ใบซื้อพังหลังปิดรอบ: journal ต้องค้าง ROUND_CLOSED และ retry เฉพาะใบซื้อ
@@ -823,12 +824,117 @@ const summaryFailedCutoff = context.api.executeCutoff(mainBook, "29/07/69", "evt
 assert.match(summaryFailedCutoff.summaryError, /simulated summary failure/);
 assert.equal(context.api.loadCutoffJournal(mainBook, "29/07/69|1").status, "ROUND_CLOSED");
 assert.equal(stock.getRange(summaryRetryStockRow, 3).getValue(), 7);
+const coercedJournalSheet = mainBook.getSheetByName("_CutoffJournal");
+const coercedJournalRow = coercedJournalSheet.rows.findIndex((row) => row[0] === "29/07/69|1") + 1;
+coercedJournalSheet.getRange(coercedJournalRow, 2).setValue(
+    vm.runInContext("new Date(2026, 6, 29)", context),
+); // จำลอง Google Sheets แปลงข้อความเป็น Date ใน Apps Script realm เดียวกัน
+context.updatePurchaseSummarySheet = () => { throw new Error("simulated repeated summary failure"); };
+const repeatedSummaryFailure = context.api.executeCutoff(mainBook, "29/07/69", "evt-summary-fail-again");
+assert.equal(repeatedSummaryFailure.recoveryRetryFailed, true);
+assert.equal(repeatedSummaryFailure.recoveredRound, 1);
+assert.match(repeatedSummaryFailure.summaryError, /simulated repeated summary failure/);
+assert.equal(context.api.loadCutoffJournal(mainBook, "29/07/69|1").status, "ROUND_CLOSED");
+assert.equal(stock.getRange(summaryRetryStockRow, 3).getValue(), 7);
 context.updatePurchaseSummarySheet = originalUpdatePurchaseSummary;
 const summaryRetriedCutoff = context.api.executeCutoff(mainBook, "29/07/69", "evt-summary-retry");
 assert.equal(summaryRetriedCutoff.summaryError, null);
+assert.equal(summaryRetriedCutoff.recoveredOnly, true);
+assert.equal(summaryRetriedCutoff.recoveredRound, 1);
 assert.equal(context.api.loadCutoffJournal(mainBook, "29/07/69|1").status, "COMPLETE");
 assert.equal(stock.getRange(summaryRetryStockRow, 3).getValue(), 7);
 assert.equal(mainBook.getSheetByName("ออเดอร์-29-07-69").rows.filter((row) => row[0] === "รอบ 2").length, 1);
+assert.equal(mainBook.getSheetByName("ออเดอร์-29-07-69").rows.filter((row) => row[0] === "รอบ 3").length, 0);
+
+// ถ้ามีออเดอร์รอบใหม่แล้ว retry ROUND_CLOSED ต้องซ่อมรอบเก่าและตัดรอบใหม่ในคำสั่งเดียว
+stock.rows.push(
+    ["", "30/07/69", "", ""],
+    ["", "แอปเปิล", 10, "กก"],
+);
+const recoveryFollowUpStockRow = stock.rows.length;
+const recoveryFollowUpSheet = new Sheet("ออเดอร์-30-07-69", [
+    ["ใบจัดออเดอร์"],
+    ["ลำดับที่ 1", "", "", "", "", ""],
+    ["วันที่", "ชื่อร้าน", "สินค้า", "จำนวน", "หน่วย", ""],
+    ["30/07/69", "ร้านทดสอบ", "แอปเปิล", 3, "กก.", "", "EXACT"],
+]);
+mainBook.sheets.set(recoveryFollowUpSheet.name, recoveryFollowUpSheet);
+let recoverySummaryCalls = 0;
+context.updatePurchaseSummarySheet = (...args) => {
+    recoverySummaryCalls++;
+    if (recoverySummaryCalls === 2) throw new Error("simulated recovery summary failure");
+    return originalUpdatePurchaseSummary(...args);
+};
+const recoveryFailed = context.api.executeCutoff(mainBook, "30/07/69", "evt-recovery-fail");
+assert.match(recoveryFailed.summaryError, /simulated recovery summary failure/);
+assert.equal(stock.getRange(recoveryFollowUpStockRow, 3).getValue(), 7);
+assert.equal(context.api.loadCutoffJournal(mainBook, "30/07/69|1").status, "ROUND_CLOSED");
+
+recoveryFollowUpSheet.rows.push(
+    ["ลำดับที่ 1", "", "", "", "", ""],
+    ["วันที่", "ชื่อร้าน", "สินค้า", "จำนวน", "หน่วย", ""],
+    ["30/07/69", "ร้านทดสอบ", "แอปเปิล", 5, "กก.", "", "EXACT"],
+);
+let successfulRecoverySummaryCalls = 0;
+context.updatePurchaseSummarySheet = (...args) => {
+    successfulRecoverySummaryCalls++;
+    return originalUpdatePurchaseSummary(...args);
+};
+const recoveredAndCut = context.api.executeCutoff(mainBook, "30/07/69", "evt-recovery-follow-up");
+context.updatePurchaseSummarySheet = originalUpdatePurchaseSummary;
+assert.equal(successfulRecoverySummaryCalls, 2); // ซ่อมรอบเก่า 1 ครั้ง + สรุปรอบใหม่หลังปิด 1 ครั้ง
+assert.equal(recoveredAndCut.recoveredRound, 1);
+assert.equal(recoveredAndCut.res.closedRound, 2);
+assert.equal(recoveredAndCut.deductRes.deductedItems[0].deducted, 5);
+assert.equal(stock.getRange(recoveryFollowUpStockRow, 3).getValue(), 2);
+assert.equal(context.api.loadCutoffJournal(mainBook, "30/07/69|1").status, "COMPLETE");
+assert.equal(context.api.loadCutoffJournal(mainBook, "30/07/69|2").status, "COMPLETE");
+assert.equal(recoveryFollowUpSheet.rows.filter((row) => row[0] === "รอบ 2").length, 1);
+assert.equal(recoveryFollowUpSheet.rows.filter((row) => row[0] === "รอบ 3").length, 1);
+const recoveredStockAfterRetry = stock.getRange(recoveryFollowUpStockRow, 3).getValue();
+const noDuplicateCutoff = context.api.executeCutoff(mainBook, "30/07/69", "evt-recovery-follow-up");
+assert.equal(noDuplicateCutoff.deductRes.success, false);
+assert.equal(stock.getRange(recoveryFollowUpStockRow, 3).getValue(), recoveredStockAfterRetry);
+
+// ซ่อมรอบเก่าสำเร็จแต่เตรียมรอบใหม่ล้ม ต้องไม่รายงานว่ารอบใหม่สำเร็จและต้องไม่หักซ้ำ
+const followUpFailureDate = "11/08/69";
+const followUpFailureStock = stockBook.getSheetByName("ของในสต็อก AUG");
+followUpFailureStock.rows.push(
+    ["", followUpFailureDate, "", ""],
+    ["", "แอปเปิล", 10, "กก"],
+);
+const followUpFailureStockRow = followUpFailureStock.rows.length;
+const followUpFailureSheet = new Sheet("ออเดอร์-11-08-69", [
+    ["ใบจัดออเดอร์"],
+    ["ลำดับที่ 1", "", "", "", "", ""],
+    ["วันที่", "ชื่อร้าน", "สินค้า", "จำนวน", "หน่วย", ""],
+    [followUpFailureDate, "ร้านทดสอบ", "แอปเปิล", 2, "กก.", "", "EXACT"],
+]);
+mainBook.sheets.set(followUpFailureSheet.name, followUpFailureSheet);
+let initialFailureCalls = 0;
+context.updatePurchaseSummarySheet = (...args) => {
+    initialFailureCalls++;
+    if (initialFailureCalls === 2) throw new Error("simulated initial summary failure");
+    return originalUpdatePurchaseSummary(...args);
+};
+const initialFollowUpFailure = context.api.executeCutoff(mainBook, followUpFailureDate, "evt-follow-up-initial");
+assert.match(initialFollowUpFailure.summaryError, /simulated initial summary failure/);
+assert.equal(followUpFailureStock.getRange(followUpFailureStockRow, 3).getValue(), 8);
+followUpFailureSheet.rows.push(
+    ["ลำดับที่ 1", "", "", "", "", ""],
+    ["วันที่", "ชื่อร้าน", "สินค้า", "จำนวน", "หน่วย", ""],
+    [followUpFailureDate, "ร้านทดสอบ", "แอปเปิล", 3, "กก.", "", "EXACT"],
+);
+context.updatePurchaseSummarySheet = originalUpdatePurchaseSummary;
+followUpFailureStock.rows.push(["", "แอปเปิล", 99, "กก"]); // ทำให้ prepare รอบใหม่ fail แบบไม่สร้าง journal
+const failedFollowUp = context.api.executeCutoff(mainBook, followUpFailureDate, "evt-follow-up-retry");
+assert.equal(failedFollowUp.recoveredOnly, true);
+assert.equal(failedFollowUp.recoveredRound, 1);
+assert.match(failedFollowUp.followUpError, /พบสินค้าซ้ำในสต๊อก/);
+assert.equal(context.api.loadCutoffJournal(mainBook, `${followUpFailureDate}|1`).status, "COMPLETE");
+assert.equal(context.api.loadCutoffJournal(mainBook, `${followUpFailureDate}|2`), null);
+assert.equal(followUpFailureStock.getRange(followUpFailureStockRow, 3).getValue(), 8);
+assert.equal(followUpFailureSheet.rows.filter((row) => row[0] === "รอบ 3").length, 0);
 
 // Stress test: 10 รอบ × 20 ร้าน × 15 สินค้า = 3,000 รายการ
 const stressStarted = Date.now();

@@ -246,7 +246,7 @@ function loadPendingCutoffJournal(ss, deliveryDate) {
     const rows = sheet.getRange(2, 1, lastRow - 1, 8).getValues();
     for (let i = rows.length - 1; i >= 0; i--) {
         const status = String(rows[i][4] || "");
-        if (String(rows[i][1] || "") !== deliveryDate || status === "COMPLETE") continue;
+        if (normalizeDelivDate(rows[i][1]) !== deliveryDate || status === "COMPLETE") continue;
         let payload;
         try {
             payload = JSON.parse(String(rows[i][5] || "{}"));
@@ -262,16 +262,24 @@ function saveCutoffJournal(ss, key, deliveryDate, round, eventId, status, payloa
     const sheet = getCutoffJournalSheet(ss);
     const existing = loadCutoffJournal(ss, key);
     const values = [[key, deliveryDate, round, eventId || "", status, JSON.stringify(payload || {}), errorMessage || "", new Date()]];
-    if (existing) {
-        sheet.getRange(existing.row, 1, 1, 8).setValues(values);
-        return existing.row;
-    }
-    sheet.getRange(sheet.getLastRow() + 1, 1, 1, 8).setValues(values);
-    return sheet.getLastRow();
+    const row = existing ? existing.row : sheet.getLastRow() + 1;
+    sheet.getRange(row, 1, 1, 2).setNumberFormat("@");
+    sheet.getRange(row, 1, 1, 8).setValues(values);
+    return row;
 }
 
-function executeCutoff(ss, targetDate, eventId) {
+function hasOpenOrdersForCutoff(ss, targetDate) {
+    const orderSheet = ss.getSheetByName("ออเดอร์-" + targetDate.replace(/\//g, "-"));
+    if (!orderSheet) return false;
+    const rounds = getOrderRounds(orderSheet);
+    if (!rounds.length) return false;
+    const openRound = rounds[rounds.length - 1];
+    return !openRound.isClosed && Object.keys(openRound.products).length > 0;
+}
+
+function executeCutoff(ss, targetDate, eventId, allowFollowUp = true, skipPreRefresh = false) {
     let journal = loadPendingCutoffJournal(ss, targetDate);
+    const resumedRoundClosed = !!journal && journal.status === "ROUND_CLOSED";
     let deductRes;
     let closedRound;
 
@@ -280,10 +288,12 @@ function executeCutoff(ss, targetDate, eventId) {
         closedRound = journal.round;
     } else {
         // Refresh รอบที่กำลังเปิดจากสต๊อกจริงก่อนหัก เพื่อไม่ให้ snapshot เก่าถูกแช่แข็ง
-        try {
-            updatePurchaseSummarySheet(ss, targetDate, false, true);
-        } catch (err) {
-            return { syncError: err.message };
+        if (!skipPreRefresh) {
+            try {
+                updatePurchaseSummarySheet(ss, targetDate, false, true);
+            } catch (err) {
+                return { syncError: err.message };
+            }
         }
 
         deductRes = prepareStockDeduction(ss, targetDate);
@@ -331,7 +341,41 @@ function executeCutoff(ss, targetDate, eventId) {
         }
         saveCutoffJournal(ss, journal.key, targetDate, closedRound, eventId, summaryError ? "ROUND_CLOSED" : "COMPLETE", { deductRes }, summaryError || "");
     }
-    return { deductRes, res, summaryError };
+
+    if (resumedRoundClosed && !summaryError && allowFollowUp) {
+        const recoveredResult = {
+            deductRes,
+            res,
+            summaryError: null,
+            recoveredOnly: true,
+            recoveredRound: closedRound,
+        };
+        if (!hasOpenOrdersForCutoff(ss, targetDate)) return recoveredResult;
+
+        const followUp = executeCutoff(ss, targetDate, eventId, false, true);
+        const followUpError = followUp.syncError
+            || (!followUp.deductRes || !followUp.deductRes.success
+                ? (followUp.deductRes && followUp.deductRes.message) || "ไม่สามารถเตรียมตัดรอบใหม่ได้"
+                : (!followUp.res || !followUp.res.success
+                    ? (followUp.res && followUp.res.message) || "ไม่สามารถปิดรอบใหม่ได้"
+                    : ""));
+        if (followUpError) {
+            return {
+                ...recoveredResult,
+                followUpError,
+                followUpDeductRes: followUp.deductRes || null,
+                followUpRes: followUp.res || null,
+            };
+        }
+        return { ...followUp, recoveredRound: closedRound };
+    }
+    return {
+        deductRes,
+        res,
+        summaryError,
+        recoveryRetryFailed: resumedRoundClosed && !!summaryError,
+        recoveredRound: resumedRoundClosed ? closedRound : undefined,
+    };
 }
 
 function getSourceUserId(event) {
@@ -544,6 +588,37 @@ function handleTextEvent(event) {
 
             const result = withScriptLock(() => executeCutoff(ss, targetDate, ACTIVE_EVENT_ID));
 
+            if (result.recoveryRetryFailed) {
+                safeSetLog(logSheet, logRow, `Cutoff Recovery Retry Failed: ${targetDate}; Round ${result.recoveredRound}; ${result.summaryError}`);
+                replyToLine(
+                    replyToken,
+                    `⚠️ รอบที่ ${result.recoveredRound} ของวันที่ ${targetDate} ปิดไปแล้วและไม่ได้หักสต๊อกซ้ำ\n` +
+                    `แต่ซ่อมใบซื้อยังไม่สำเร็จ: ${result.summaryError}\n` +
+                    `กรุณาพิมพ์ตัดรอบอีกครั้ง`,
+                );
+                return replySuccess();
+            }
+
+            if (result.recoveredOnly) {
+                if (result.followUpError) {
+                    safeSetLog(logSheet, logRow, `Cutoff Recovery Success: ${targetDate}; Recovered ${result.recoveredRound}; Follow-up Failed: ${result.followUpError}`);
+                    replyToLine(
+                        replyToken,
+                        `✅ ซ่อมใบซื้อรอบที่ ${result.recoveredRound} สำหรับวันที่ ${targetDate} สำเร็จแล้ว\n` +
+                        `⚠️ แต่ตัดรอบใหม่ยังไม่สมบูรณ์: ${result.followUpError}\n` +
+                        `กรุณาพิมพ์ตัดรอบอีกครั้ง ระบบจะทำต่อโดยไม่หักสต๊อกซ้ำ`,
+                    );
+                } else {
+                    safeSetLog(logSheet, logRow, `Cutoff Recovery Success: ${targetDate}; Recovered ${result.recoveredRound}; No New Orders`);
+                    replyToLine(
+                        replyToken,
+                        `✅ ซ่อมใบซื้อรอบที่ ${result.recoveredRound} สำหรับวันที่ ${targetDate} สำเร็จแล้ว\n` +
+                        `ℹ️ ไม่มีออเดอร์รอบใหม่ให้ตัด`,
+                    );
+                }
+                return replySuccess();
+            }
+
             if (result.syncError) {
                 safeSetLog(logSheet, logRow, `Cutoff Sync Failed: ${targetDate}`);
                 replyToLine(replyToken, `❌ ไม่สามารถตัดรอบได้ เพราะอ่านสต๊อกล่าสุดไม่สำเร็จ\n${result.syncError}`);
@@ -560,7 +635,8 @@ function handleTextEvent(event) {
                 const cutoffStatus = `Cutoff Success: ${targetDate}; Closed ${result.res.closedRound}; Opened ${result.res.round}; ` +
                     `Full ${result.deductRes.fullDeductedCount || 0}; Partial ${(result.deductRes.partialItems || []).length}; ` +
                     `No Stock ${result.deductRes.zeroStockCount || 0}; Unmatched ${result.deductRes.unmatchedCount || 0}` +
-                    (result.summaryError ? `; Summary Warning: ${result.summaryError}` : "");
+                    (result.summaryError ? `; Summary Warning: ${result.summaryError}` : "") +
+                    (result.recoveredRound ? `; Recovered ${result.recoveredRound}` : "");
                 safeSetLog(logSheet, logRow, cutoffStatus);
                 const fmtQty = (qty) => Math.round(qty * 1000) / 1000;
                 const deductedItems = result.deductRes.deductedItems || [];
@@ -587,7 +663,10 @@ function handleTextEvent(event) {
                 const summaryWarning = result.summaryError
                     ? `\n⚠️ หักสต๊อกและปิดรอบแล้ว แต่ใบซื้ออัปเดตไม่สำเร็จ: ${result.summaryError}`
                     : "";
-                replyToLine(replyToken, `✅ ตัดรอบที่ ${result.res.closedRound} สำหรับวันที่ ${targetDate} เรียบร้อยแล้ว${stockDetail}${summaryWarning}`);
+                const recoveryNote = result.recoveredRound
+                    ? `\n♻️ ซ่อมใบซื้อรอบที่ ${result.recoveredRound} สำเร็จแล้วในคำสั่งเดียวกัน`
+                    : "";
+                replyToLine(replyToken, `✅ ตัดรอบที่ ${result.res.closedRound} สำหรับวันที่ ${targetDate} เรียบร้อยแล้ว${stockDetail}${summaryWarning}${recoveryNote}`);
             } else {
                 safeSetLog(logSheet, logRow, `Cutoff Failed: ${targetDate}; order sheet not found`);
                 replyToLine(replyToken, `❌ ไม่สามารถสร้างแถวตัดรอบได้ (ยังไม่มีใบจัดออเดอร์ของวันที่ ${targetDate})`);
