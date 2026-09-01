@@ -127,9 +127,14 @@ vm.runInContext(appScriptSource +
     "\nthis.api={CONFIG,withScriptLock,getStableHash,normalizeDelivDate,parseOrderMessage,processStockUpdate,applyStockUpdatePlan,processOrderUpdate,saveEventJournal,loadEventJournal,updateDeliverySheet,getOrderRounds,findStoreOrders,getOrderSnapshotHash,formatCancelPreview,cancelOrderIfSnapshotMatches,updatePurchaseSummarySheet,prepareStockDeduction,applyStockDeductionPlan,deductStockForCutoff,createCutoffRoundDivider,executeCutoff,saveCutoffJournal,loadCutoffJournal,beginEventLog,setActiveLogContext,setActiveReplyState,finishActiveLog,recordEventFailure,replyToLine,getStoreMappingDictionary,getNoStockProductNames,getOrderMatchNotes,formatStoreMappingLog,onEdit,validateDirectOrderTestInput};", context);
 
 const claspProject = JSON.parse(fs.readFileSync(".clasp.json", "utf8"));
+const appScriptManifest = JSON.parse(fs.readFileSync("src/appsscript.json", "utf8"));
 assert.equal(claspProject.rootDir, "src");
 assert.deepEqual(claspProject.filePushOrder, appScriptFiles);
 assert.equal(context.api.CONFIG.SHEET_ID, "1IUpkB2Cs2cjXVoBm_d9OYiYxhxzz9ReWCftNOlKphVk");
+assert.deepEqual(appScriptManifest.oauthScopes, [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/script.external_request",
+]);
 assert.deepEqual(
     context.api.validateDirectOrderTestInput(
         "31/12/99\nTEST-Codex\nแครอท 0.123 กก",
