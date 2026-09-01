@@ -1,0 +1,24 @@
+{
+  "scriptId": "1fa1a5Ble9AFev_LQshfY8KUMAABso-oV0WvQdzHq0f21Bi0AEYeh73c3",
+  "rootDir": "src",
+  "scriptExtensions": [
+    ".js",
+    ".gs"
+  ],
+  "htmlExtensions": [
+    ".html"
+  ],
+  "jsonExtensions": [
+    ".json"
+  ],
+  "filePushOrder": [
+    "00_Config.gs",
+    "10_Core.gs",
+    "20_Webhook.gs",
+    "30_Parsing.gs",
+    "40_Stock.gs",
+    "50_Orders.gs",
+    "60_Cutoff.gs"
+  ],
+  "skipSubdirectories": false
+}
