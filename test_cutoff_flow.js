@@ -124,13 +124,15 @@ const appScriptSource = appScriptFiles
     .map((file) => fs.readFileSync(`src/${file}`, "utf8"))
     .join("");
 vm.runInContext(appScriptSource +
-    "\nthis.api={CONFIG,withScriptLock,getStableHash,normalizeDelivDate,parseOrderMessage,processStockUpdate,applyStockUpdatePlan,processOrderUpdate,saveEventJournal,loadEventJournal,updateDeliverySheet,getOrderRounds,findStoreOrders,getOrderSnapshotHash,formatCancelPreview,cancelOrderIfSnapshotMatches,updatePurchaseSummarySheet,prepareStockDeduction,applyStockDeductionPlan,deductStockForCutoff,createCutoffRoundDivider,executeCutoff,saveCutoffJournal,loadCutoffJournal,beginEventLog,setActiveLogContext,setActiveReplyState,finishActiveLog,recordEventFailure,replyToLine,getStoreMappingDictionary,getNoStockProductNames,getOrderMatchNotes,formatStoreMappingLog,onEdit,validateDirectOrderTestInput};", context);
+    "\nthis.api={CONFIG,withScriptLock,getStableHash,normalizeDelivDate,parseOrderMessage,processStockUpdate,applyStockUpdatePlan,processOrderUpdate,saveEventJournal,loadEventJournal,updateDeliverySheet,getOrderRounds,findStoreOrders,getOrderSnapshotHash,formatCancelPreview,cancelOrderIfSnapshotMatches,updatePurchaseSummarySheet,prepareStockDeduction,applyStockDeductionPlan,deductStockForCutoff,createCutoffRoundDivider,executeCutoff,saveCutoffJournal,loadCutoffJournal,beginEventLog,setActiveLogContext,setActiveReplyState,finishActiveLog,recordEventFailure,replyToLine,getStoreMappingDictionary,getNoStockProductNames,getOrderMatchNotes,formatStoreMappingLog,onEdit,validateDirectOrderTestInput,validateDirectCommandTestInput,validateDirectPendingCancel};", context);
 
 const claspProject = JSON.parse(fs.readFileSync(".clasp.json", "utf8"));
 const appScriptManifest = JSON.parse(fs.readFileSync("src/appsscript.json", "utf8"));
 assert.equal(claspProject.rootDir, "src");
 assert.deepEqual(claspProject.filePushOrder, appScriptFiles);
 assert.equal(context.api.CONFIG.SHEET_ID, "1IUpkB2Cs2cjXVoBm_d9OYiYxhxzz9ReWCftNOlKphVk");
+assert.equal(claspProject.projectId, "mr-fruity");
+assert.equal(appScriptManifest.executionApi.access, "MYSELF");
 assert.deepEqual(appScriptManifest.oauthScopes, [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/script.external_request",
@@ -153,6 +155,35 @@ assert.throws(
 assert.throws(
     () => context.api.validateDirectOrderTestInput("ตัดรอบ 31/12/99", "test-direct-20260902-04"),
     /คำสั่งแอดมิน/,
+);
+assert.equal(
+    context.api.validateDirectCommandTestInput("ตัดรอบ 31/12/99", "test-command-20260902-01").type,
+    "CUTOFF",
+);
+assert.equal(
+    context.api.validateDirectCommandTestInput("เติมสต๊อก 31/12/99\nแครอท 5 กก", "test-command-20260902-02").type,
+    "STOCK_FILL",
+);
+assert.equal(
+    context.api.validateDirectCommandTestInput("ยกเลิก TEST-Codex 31/12/99", "test-command-20260902-03").type,
+    "CANCEL_PREVIEW",
+);
+assert.throws(
+    () => context.api.validateDirectCommandTestInput("ตัดรอบ 30/12/99", "test-command-20260902-04"),
+    /31\/12\/99/,
+);
+assert.throws(
+    () => context.api.validateDirectCommandTestInput("ยกเลิก ร้านจริง 31/12/99", "test-command-20260902-05"),
+    /TEST-/,
+);
+assert.throws(
+    () => context.api.validateDirectCommandTestInput("เติมสต๊อก 31/12/99\nตัดรอบ 31/12/99", "test-command-20260902-06"),
+    /คำสั่งซ้อน/,
+);
+assert.equal(context.api.validateDirectPendingCancel({ storeName: "TEST-Codex", deliveryDate: "31/12/99" }), true);
+assert.throws(
+    () => context.api.validateDirectPendingCancel({ storeName: "ร้านจริง", deliveryDate: "31/12/99" }),
+    /TEST-/,
 );
 
 function purchaseRow(round) {
